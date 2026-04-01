@@ -51,6 +51,10 @@
 #include "dota_animation.h"
 #endif
 
+#ifdef ENABLE_DASLANG
+#include "daslang_vscript.h"
+#endif
+
 extern ScriptClassDesc_t * GetScriptDesc( CBaseEntity * );
 
 extern CServerGameDLL g_ServerGameDLL;
@@ -2502,25 +2506,19 @@ bool VScriptServerInit()
 				scriptLanguage = SL_NONE;
 			}
 		}
-			else if( !Q_stricmp(pszScriptLanguage, "squirrel") )
-			{
-				scriptLanguage = SL_SQUIRREL;
-			}
-			else if( !Q_stricmp(pszScriptLanguage, "python") )
-			{
-				scriptLanguage = SL_PYTHON;
-			}
-			else
-			{
-				DevWarning("-server_script does not recognize a language named '%s'. virtual machine did NOT start.\n", pszScriptLanguage );
-				scriptLanguage = SL_NONE;
-			}
-
-		}
 		if( scriptLanguage != SL_NONE )
 		{
 			if ( g_pScriptVM == NULL )
-				g_pScriptVM = scriptmanager->CreateVM( scriptLanguage );
+			{
+				if ( scriptLanguage == SL_DASLANG )
+				{
+					g_pScriptVM = CreateDaslangVM();
+				}
+				else
+				{
+					g_pScriptVM = scriptmanager->CreateVM( scriptLanguage );
+				}
+			}
 
 			if ( ( script_attach_debugger_at_startup.GetBool() || CommandLine()->CheckParm( "-vscriptdebug" ) ) && g_pScriptVM )
 			{
@@ -2531,18 +2529,6 @@ bool VScriptServerInit()
 			{
 				Log_Msg( LOG_VScript, "VSCRIPT: Started VScript virtual machine using script language '%s'\n", g_pScriptVM->GetLanguageName() );
 				g_pScriptVM->SetErrorCallback( &VScriptServerScriptErrorFunc );
-
-				// Register Daslang JBMod module if we're using Daslang
-				if ( scriptLanguage == SL_DASLANG )
-				{
-					// In a real implementation with our actual SDK integration:
-					// 1. We already included the actual Daslang headers in daslang_vscript.cpp
-					// 2. The ModuleLibrary is created in the CDaslangVM::Init() function
-					// 3. RegisterDaslangJBModModule is called in CDaslangVM::Init()
-					// 4. The module is registered with the VM context
-					
-					Log_Msg( LOG_VScript, "VSCRIPT: Daslang JBMod module registered via CDaslangVM::Init()\n" );
-				}
 
 				ScriptRegisterFunctionNamed( g_pScriptVM, ScriptRegisterEntityClass, "RegisterEntityClass", "Registers a new entity classname mapped to an existing base class" );
 				ScriptRegisterFunctionNamed( g_pScriptVM, UTIL_ShowMessageAll, "ShowMessage", "Print a hud message on all clients" );

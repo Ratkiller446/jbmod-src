@@ -27,6 +27,10 @@
 #include "hud_macros.h"
 #include "iclassmap.h"
 
+#ifdef ENABLE_DASLANG
+#include "daslang_vscript.h"
+#endif
+
 #if defined( PORTAL2_PUZZLEMAKER )
 #include "matchmaking/imatchframework.h"
 #endif // PORTAL2_PUZZLEMAKER
@@ -168,6 +172,10 @@ bool VScriptClientInit()
 			{
 				scriptLanguage = SL_PYTHON;
 			}
+			else if( !Q_stricmp(pszScriptLanguage, "daslang") )
+			{
+				scriptLanguage = SL_DASLANG;
+			}
 			else
 			{
 				DevWarning("-scriptlang does not recognize a language named '%s'. virtual machine did NOT start.\n", pszScriptLanguage );
@@ -178,7 +186,16 @@ bool VScriptClientInit()
 		if( scriptLanguage != SL_NONE )
 		{
 			if ( g_pScriptVM == NULL )
-				g_pScriptVM = scriptmanager->CreateVM( scriptLanguage );
+			{
+				if ( scriptLanguage == SL_DASLANG )
+				{
+					g_pScriptVM = CreateDaslangVM();
+				}
+				else
+				{
+					g_pScriptVM = scriptmanager->CreateVM( scriptLanguage );
+				}
+			}
 
 			if( g_pScriptVM )
 			{

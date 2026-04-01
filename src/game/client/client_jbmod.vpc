@@ -13,8 +13,8 @@ $Configuration
 {
 		$Compiler
 		{
-		$AdditionalIncludeDirectories		"$BASE;jbmodui,.jbmod,$SRCDIRgamesharedjbmod,.hl2,.hl2elements,$SRCDIRgamesharedhl2,$SRCDIRgamesharedepisodic,$SRCDIRsrcpublic"
-			$PreprocessorDefinitions			"$BASE;JBMOD;HL2MP;HL2_CLIENT_DLL;HL2_EPISODIC;NEXT_BOT"
+		$AdditionalIncludeDirectories		"$BASE;jbmodui,.jbmod,$SRCDIRgamesharedjbmod,.hl2,.hl2elements,$SRCDIRgamesharedhl2,$SRCDIRgamesharedepisodic,$SRCDIRsrcpublic,$SRCDIRdaScriptinclude,$SRCDIRdaScriptincludedaScript"
+			$PreprocessorDefinitions			"$BASE;JBMOD;HL2MP;HL2_CLIENT_DLL;HL2_EPISODIC;NEXT_BOT;ENABLE_DASLANG"
 		}
 }
 
@@ -203,6 +203,15 @@ $Project "Client (JBMod)"
 				$File	"jbmod\ui\jbmodtextwindow.h"
 				$File	"jbmod\hud_deathnotice.cpp"
 			}
+		}
+
+		$Folder	"Daslang"
+		{
+			$File	"$SRCDIR/public/daslang_vscript.cpp"
+			$File	"$SRCDIR/public/daslang_vscript.h"
+			$File	"$SRCDIR/public/idlasngvm.h"
+			$File	"$SRCDIR/public/daslang_jbmod_module.cpp"
+			$File	"$SRCDIR/public/daslang_jbmod_module.h"
 		}
 	}
 }

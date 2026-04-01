@@ -1,15 +1,12 @@
 //========= Copyright Valve Corporation, All rights reserved. ============//
-//
-// Purpose: Daslang VM implementation for VScript system
-//=============================================================================//
 
 #include "daslang_vscript.h"
 #include "cbase.h"
 #include "tier0/icommandline.h"
 #include "tier0/memdbgon.h"
 #include "vscript/ivscript.h"
+#include "vscript/variant.h"
 
-// Include actual Daslang headers
 #include <daScript/daScript.h>
 #include <daScript/module/built_in.h>
 #include <daScript/module/math.h>
@@ -19,15 +16,18 @@
 #include <daScript/module/jit.h>
 #include <daScript/module/fio.h>
 #include <daScript/module/network.h>
-#include <dasModules/aotStandardLibrary.h> // from our cloned repo
 
-// Forward declaration for our JBMod module registration function
 extern void RegisterDaslangJBModModule(das::ModuleLibrary& lib);
 
 CDaslangVM::CDaslangVM()
+    : m_pContext(nullptr)
+    , m_pModuleLibrary(nullptr)
+    , m_pModuleGroup(nullptr)
+    , m_pOutputCallback(nullptr)
+    , m_pErrorCallback(nullptr)
+    , m_nUniqueKeyCounter(0)
+    , m_GlobalVariables(0, 0, CaselessStringLessThan)
 {
-    m_pContext = nullptr;
-    m_pModule = nullptr;
 }
 
 CDaslangVM::~CDaslangVM()
@@ -37,17 +37,11 @@ CDaslangVM::~CDaslangVM()
 
 bool CDaslangVM::Init()
 {
-    // Initialize Daslang module system
     das::Module::Initialize();
-    
-    // Register all builtin modules
     das::register_builtin_modules();
     
-    // Create module group for shared compilation state
-    m_DummyLibGroup = das::ModuleGroup();
-    
-    // Create execution context
-    m_pContext = new das::Context(4096); // 4K stack size
+    m_pModuleGroup = new das::ModuleGroup();
+    m_pContext = new das::Context(4096);
     
     if (!m_pContext)
     {
@@ -55,39 +49,48 @@ bool CDaslangVM::Init()
         return false;
     }
     
-    // Register JBMod-specific API bindings
-    {
-        das::ModuleLibrary lib(m_pContext);
-        RegisterDaslangJBModModule(lib);
-    }
-    
-    // Note: We don't create a persistent module here since we'll compile scripts on demand
-    // The context is ready to evaluate compiled programs
+    m_pModuleLibrary = new das::ModuleLibrary(m_pContext);
+    RegisterDaslangJBModModule(*m_pModuleLibrary);
+    RegisterBuiltinFunctions();
     
     return true;
 }
 
 void CDaslangVM::Shutdown()
 {
+    m_RegisteredFunctions.RemoveAll();
+    m_RegisteredClasses.RemoveAll();
+    m_RegisteredInstances.RemoveAll();
+    m_GlobalVariables.RemoveAll();
+    
+    if (m_pModuleLibrary)
+    {
+        delete m_pModuleLibrary;
+        m_pModuleLibrary = nullptr;
+    }
+    
     if (m_pContext)
     {
         delete m_pContext;
         m_pContext = nullptr;
     }
     
-    // Shutdown Daslang module system
+    if (m_pModuleGroup)
+    {
+        delete m_pModuleGroup;
+        m_pModuleGroup = nullptr;
+    }
+    
     das::Module::Shutdown();
 }
 
 bool CDaslangVM::ConnectDebugger()
 {
-    // TODO: Implement debugger connection if needed
     return false;
 }
 
 void CDaslangVM::DisconnectDebugger()
 {
-    // TODO: Implement debugger disconnection if needed
 }
 
 ScriptLanguage_t CDaslangVM::GetLanguage()
@@ -102,120 +105,104 @@ const char *CDaslangVM::GetLanguageName()
 
 void CDaslangVM::AddSearchPath(const char *pszSearchPath)
 {
-    // TODO: Implement search path functionality if needed
 }
 
 bool CDaslangVM::Frame(float simTime)
 {
-    // Daslang doesn't typically need per-frame processing
     return false;
 }
 
-// Script usage
 ScriptStatus_t CDaslangVM::Run(const char *pszScript, bool bWait)
 {
     if (!m_pContext || !pszScript)
         return SCRIPT_ERROR;
     
-    // Compile the script
     das::CompileOptions options;
-    das::ModuleGroup dummyLibGroup;
-    auto program = das::compileDasScript(pszScript, options, dummyLibGroup);
+    auto program = das::compileDaScript(pszScript, options, *m_pModuleGroup);
     
-    if (!program)
+    if (!program || !program->isOk())
     {
-        Warning("Failed to compile Daslang script: %s\n", pszScript);
+        Warning("Failed to compile Daslang script\n");
+        if (program)
+        {
+            Warning("Compilation errors: %s\n", program->errors.c_str());
+        }
         return SCRIPT_ERROR;
     }
     
-    // Simulate (initialize globals)
-    if (!program->simulate(*m_pContext))
-    {
-        Warning("Failed to simulate Daslang script: %s\n", pszScript);
-        return SCRIPT_ERROR;
-    }
-    
-    // Look for a main function to call
-    das::Function* mainFunc = m_pContext->getFunction("main");
-    if (!mainFunc)
-    {
-        // No main function, just return success (script executed for side effects)
-        return SCRIPT_OK;
-    }
-    
-    // Call the main function
-    das::Context::FunctionCallContext callContext;
-    if (!m_pContext->invoke(*mainFunc, callContext))
-    {
-        Warning("Failed to invoke main function in Daslang script: %s\n", pszScript);
-        return SCRIPT_ERROR;
-    }
-    
-    return SCRIPT_OK;
-}
-
-// Compilation
-HSCRIPT CDaslangVM::CompileScript(const char *pszScript, const char *pszId)
-{
-    if (!pszScript)
-        return nullptr;
-    
-    // Compile the script but don't simulate it yet
-    das::CompileOptions options;
-    das::ModuleGroup dummyLibGroup;
-    auto program = das::compileDasScript(pszScript, options, dummyLibGroup);
-    
-    if (!program)
-    {
-        Warning("Failed to compile Daslang script: %s\n", pszScript);
-        return nullptr;
-    }
-    
-    // In a real implementation, we would wrap this in our HSCRIPT type
-    // For now, we'll just return the program pointer cast to HSCRIPT
-    // NOTE: This is a simplification - a real implementation would need proper reference counting
-    return reinterpret_cast<HSCRIPT>(program.get());
-}
-
-void CDaslangVM::ReleaseScript(HSCRIPT hScript)
-{
-    // In a real implementation, we would properly release the reference
-    // For our simplified approach, we do nothing as the unique_ptr will clean up
-    // when it goes out of scope
-}
-
-// Execution of compiled
-ScriptStatus_t CDaslangVM::Run(HSCRIPT hScript, HSCRIPT hScope, bool bWait)
-{
-    if (!m_pContext || !hScript)
-        return SCRIPT_ERROR;
-    
-    // Retrieve the program from our HSCRIPT
-    auto program = reinterpret_cast<std::unique_ptr<das::Program>*>(hScript);
-    if (!program || !(*program))
-        return SCRIPT_ERROR;
-    
-    // Simulate (initialize globals) if not already done
-    if (!(*program)->simulate(*m_pContext))
+    if (!program->simulate(*m_pContext, *m_pModuleLibrary))
     {
         Warning("Failed to simulate Daslang script\n");
         return SCRIPT_ERROR;
     }
     
-    // Look for a main function to call
-    das::Function* mainFunc = m_pContext->getFunction("main");
-    if (!mainFunc)
+    das::Function *mainFunc = m_pContext->findFunction("main");
+    if (mainFunc)
     {
-        // No main function, just return success (script executed for side effects)
-        return SCRIPT_OK;
+        m_pContext->restart();
+        m_pContext->eval(mainFunc, nullptr);
+        
+        if (m_pContext->getException())
+        {
+            Warning("Daslang script exception: %s\n", m_pContext->getException()->what());
+            return SCRIPT_ERROR;
+        }
     }
     
-    // Call the main function
-    das::Context::FunctionCallContext callContext;
-    if (!m_pContext->invoke(*mainFunc, callContext))
+    return SCRIPT_OK;
+}
+
+HSCRIPT CDaslangVM::CompileScript(const char *pszScript, const char *pszId)
+{
+    if (!pszScript)
+        return nullptr;
+    
+    das::CompileOptions options;
+    auto program = das::compileDaScript(pszScript, options, *m_pModuleGroup);
+    
+    if (!program || !program->isOk())
     {
-        Warning("Failed to invoke main function in Daslang script\n");
+        Warning("Failed to compile Daslang script\n");
+        return nullptr;
+    }
+    
+    das::Program *pProgram = program.release();
+    return reinterpret_cast<HSCRIPT>(pProgram);
+}
+
+void CDaslangVM::ReleaseScript(HSCRIPT hScript)
+{
+    if (hScript)
+    {
+        das::Program *pProgram = reinterpret_cast<das::Program*>(hScript);
+        delete pProgram;
+    }
+}
+
+ScriptStatus_t CDaslangVM::Run(HSCRIPT hScript, HSCRIPT hScope, bool bWait)
+{
+    if (!m_pContext || !hScript)
         return SCRIPT_ERROR;
+    
+    das::Program *pProgram = reinterpret_cast<das::Program*>(hScript);
+    
+    if (!pProgram->simulate(*m_pContext, *m_pModuleLibrary))
+    {
+        Warning("Failed to simulate Daslang script\n");
+        return SCRIPT_ERROR;
+    }
+    
+    das::Function *mainFunc = m_pContext->findFunction("main");
+    if (mainFunc)
+    {
+        m_pContext->restart();
+        m_pContext->eval(mainFunc, nullptr);
+        
+        if (m_pContext->getException())
+        {
+            Warning("Daslang script exception: %s\n", m_pContext->getException()->what());
+            return SCRIPT_ERROR;
+        }
     }
     
     return SCRIPT_OK;
@@ -226,222 +213,290 @@ ScriptStatus_t CDaslangVM::Run(HSCRIPT hScript, bool bWait)
     return Run(hScript, NULL, bWait);
 }
 
-// Scope
 HSCRIPT CDaslangVM::CreateScope(const char *pszScope, HSCRIPT hParent)
 {
-    // TODO: Implement proper scoping if needed
-    // For now, we'll just return NULL as we don't implement scoping
     return nullptr;
 }
 
 HSCRIPT CDaslangVM::ReferenceScope(HSCRIPT hScript)
 {
-    // TODO: Implement proper scoping if needed
-    // For now, we'll just return NULL as we don't implement scoping
     return nullptr;
 }
 
 void CDaslangVM::ReleaseScope(HSCRIPT hScript)
 {
-    // TODO: Implement proper scoping cleanup if needed
 }
 
-// Script functions
 HSCRIPT CDaslangVM::LookupFunction(const char *pszFunction, HSCRIPT hScope, bool bNoDelegation)
 {
     if (!m_pContext || !pszFunction)
         return nullptr;
     
-    // Look up the function in our context
-    das::Function* func = m_pContext->getFunction(pszFunction);
-    if (!func)
-        return nullptr;
-    
-    // In a real implementation, we would wrap this in our HSCRIPT type
-    // For now, we'll just return the function pointer cast to HSCRIPT
-    // NOTE: This is a simplification - a real implementation would need proper reference counting
+    das::Function *func = m_pContext->findFunction(pszFunction);
     return reinterpret_cast<HSCRIPT>(func);
 }
 
 void CDaslangVM::ReleaseFunction(HSCRIPT hScript)
 {
-    // In a real implementation, we would properly release the reference
-    // For our simplified approach, we do nothing
 }
 
-// External functions
 void CDaslangVM::RegisterFunction(ScriptFunctionBinding_t *pScriptFunction)
 {
-    // TODO: Implement external function registration if needed
-    // This would require integration with Daslang's extern function binding system
+    if (!pScriptFunction)
+        return;
+    
+    DaslangFunctionBinding binding;
+    binding.binding = *pScriptFunction;
+    binding.pDaslangFunc = nullptr;
+    
+    m_RegisteredFunctions.AddToTail(binding);
+    BindFunctionToDaslang(pScriptFunction);
 }
 
-// External classes
 bool CDaslangVM::RegisterClass(ScriptClassDesc_t *pClassDesc)
 {
-    // TODO: Implement external class registration if needed
-    // This would require integration with Daslang's type binding system
-    return false;
+    if (!pClassDesc)
+        return false;
+    
+    DaslangClassBinding classBinding;
+    classBinding.pClassDesc = pClassDesc;
+    
+    m_RegisteredClasses.AddToTail(classBinding);
+    return BindClassToDaslang(pClassDesc);
 }
 
 void CDaslangVM::RegisterAllClasses()
 {
-    // TODO: Implement external class registration if needed
+    for (int i = 0; i < m_RegisteredClasses.Count(); i++)
+    {
+        BindClassToDaslang(m_RegisteredClasses[i].pClassDesc);
+    }
 }
 
-// External instances
 HSCRIPT CDaslangVM::RegisterInstance(ScriptClassDesc_t *pDesc, void *pInstance)
 {
-    // TODO: Implement external instance registration if needed
-    // This would require integration with Daslang's type binding system
-    return nullptr;
+    if (!pDesc || !pInstance)
+        return nullptr;
+    
+    DaslangInstanceBinding instanceBinding;
+    instanceBinding.pClassDesc = pDesc;
+    instanceBinding.pInstance = pInstance;
+    
+    m_RegisteredInstances.AddToTail(instanceBinding);
+    return reinterpret_cast<HSCRIPT>(&m_RegisteredInstances[m_RegisteredInstances.Count() - 1]);
 }
 
 void CDaslangVM::SetInstanceUniqeId(HSCRIPT hInstance, const char *pszId)
 {
-    // TODO: Implement instance ID setting if needed
+    if (!hInstance || !pszId)
+        return;
+    
+    DaslangInstanceBinding *pBinding = reinterpret_cast<DaslangInstanceBinding*>(hInstance);
+    pBinding->uniqueId = pszId;
+}
+
+void CDaslangVM::RemoveInstance(HSCRIPT hInstance)
+{
+    if (!hInstance)
+        return;
+    
+    for (int i = 0; i < m_RegisteredInstances.Count(); i++)
+    {
+        if (&m_RegisteredInstances[i] == reinterpret_cast<DaslangInstanceBinding*>(hInstance))
+        {
+            m_RegisteredInstances.Remove(i);
+            break;
+        }
+    }
+}
+
+void CDaslangVM::RemoveInstance(HSCRIPT hInstance, const char *pszInstance, HSCRIPT hScope)
+{
+    RemoveInstance(hInstance);
 }
 
 void *CDaslangVM::GetInstanceValue(HSCRIPT hInstance, ScriptClassDesc_t *pExpectedType)
 {
-    // TODO: Implement instance value retrieval if needed
-    return nullptr;
+    if (!hInstance)
+        return nullptr;
+    
+    DaslangInstanceBinding *pBinding = reinterpret_cast<DaslangInstanceBinding*>(hInstance);
+    
+    if (pExpectedType && pBinding->pClassDesc != pExpectedType)
+        return nullptr;
+    
+    return pBinding->pInstance;
 }
 
-// Value helpers
 bool CDaslangVM::GenerateUniqueKey(const char *pszRoot, char *pBuf, int nBufSize)
 {
-    // TODO: Implement unique key generation if needed
-    return false;
+    if (!pszRoot || !pBuf || nBufSize <= 0)
+        return false;
+    
+    V_snprintf(pBuf, nBufSize, "%s_%d", pszRoot, m_nUniqueKeyCounter++);
+    return true;
 }
 
 bool CDaslangVM::ValueExists(HSCRIPT hScope, const char *pszKey)
 {
-    // TODO: Implement value existence check if needed
-    return false;
+    if (!pszKey)
+        return false;
+    
+    return m_GlobalVariables.Find(pszKey) != m_GlobalVariables.InvalidIndex();
 }
 
 bool CDaslangVM::SetValue(HSCRIPT hScope, const char *pszKey, const char *pszValue)
 {
-    // TODO: Implement value setting if needed
-    return false;
+    if (!pszKey)
+        return false;
+    
+    ScriptVariant_t variant(pszValue);
+    m_GlobalVariables.InsertOrReplace(pszKey, variant);
+    return true;
 }
 
 bool CDaslangVM::SetValue(HSCRIPT hScope, const char *pszKey, const ScriptVariant_t &value)
 {
-    // TODO: Implement value setting if needed
-    return false;
-}
-
-bool CDaslangVM::SetValue(const char *pszKey, const ScriptVariant_t &value)
-{
-    // TODO: Implement value setting if needed
-    return false;
+    if (!pszKey)
+        return false;
+    
+    m_GlobalVariables.InsertOrReplace(pszKey, value);
+    return true;
 }
 
 void CDaslangVM::CreateTable(ScriptVariant_t &Table)
 {
-    // TODO: Implement table creation if needed
+    Table = ScriptVariant_t();
 }
 
 int CDaslangVM::GetNumTableEntries(HSCRIPT hScope)
 {
-    // TODO: Implement table entry counting if needed
     return 0;
 }
 
 int CDaslangVM::GetKeyValue(HSCRIPT hScope, int nIterator, ScriptVariant_t *pKey, ScriptVariant_t *pValue)
 {
-    // TODO: Implement key/value retrieval if needed
     return 0;
 }
 
 bool CDaslangVM::GetValue(HSCRIPT hScope, const char *pszKey, ScriptVariant_t *pValue)
 {
-    // TODO: Implement value retrieval if needed
-    return false;
-}
-
-bool CDaslangVM::GetValue(const char *pszKey, ScriptVariant_t *pValue)
-{
-    // TODO: Implement value retrieval if needed
-    return false;
+    if (!pszKey || !pValue)
+        return false;
+    
+    int index = m_GlobalVariables.Find(pszKey);
+    if (index == m_GlobalVariables.InvalidIndex())
+        return false;
+    
+    *pValue = m_GlobalVariables[index];
+    return true;
 }
 
 void CDaslangVM::ReleaseValue(ScriptVariant_t &value)
 {
-    // TODO: Implement value release if needed
+    value = ScriptVariant_t();
 }
 
 bool CDaslangVM::ClearValue(HSCRIPT hScope, const char *pszKey)
 {
-    // TODO: Implement value clearing if needed
-    return false;
-}
-
-bool CDaslangVM::ClearValue(const char *pszKey)
-{
-    // TODO: Implement value clearing if needed
-    return false;
+    if (!pszKey)
+        return false;
+    
+    int index = m_GlobalVariables.Find(pszKey);
+    if (index == m_GlobalVariables.InvalidIndex())
+        return false;
+    
+    m_GlobalVariables.RemoveAt(index);
+    return true;
 }
 
 void CDaslangVM::WriteState(CUtlBuffer *pBuffer)
 {
-    // TODO: Implement state writing if needed
 }
 
 void CDaslangVM::ReadState(CUtlBuffer *pBuffer)
 {
-    // TODO: Implement state reading if needed
 }
 
 void CDaslangVM::RemoveOrphanInstances()
 {
-    // TODO: Implement orphan instance removal if needed
+    for (int i = m_RegisteredInstances.Count() - 1; i >= 0; i--)
+    {
+        if (!m_RegisteredInstances[i].pInstance)
+        {
+            m_RegisteredInstances.Remove(i);
+        }
+    }
 }
 
 void CDaslangVM::DumpState()
 {
-    // TODO: Implement state dumping if needed
+    Msg("Daslang VM State:\n");
+    Msg("  Registered Functions: %d\n", m_RegisteredFunctions.Count());
+    Msg("  Registered Classes: %d\n", m_RegisteredClasses.Count());
+    Msg("  Registered Instances: %d\n", m_RegisteredInstances.Count());
+    Msg("  Global Variables: %d\n", m_GlobalVariables.Count());
 }
 
 void CDaslangVM::SetOutputCallback(ScriptOutputFunc_t pFunc)
 {
-    // TODO: Implement output callback if needed
+    m_pOutputCallback = pFunc;
 }
 
 void CDaslangVM::SetErrorCallback(ScriptErrorFunc_t pFunc)
 {
-    // TODO: Implement error callback if needed
+    m_pErrorCallback = pFunc;
 }
 
 bool CDaslangVM::RaiseException(const char *pszExceptionText)
 {
-    // TODO: Implement exception raising if needed
-    return false;
+    if (m_pErrorCallback && pszExceptionText)
+    {
+        m_pErrorCallback(pszExceptionText);
+    }
+    return true;
 }
 
-// Helper methods
 ScriptStatus_t CDaslangVM::ExecuteFunction(HSCRIPT hFunction, ScriptVariant_t *pArgs, int nArgs, ScriptVariant_t *pReturn, HSCRIPT hScope, bool bWait)
 {
     if (!m_pContext || !hFunction)
         return SCRIPT_ERROR;
     
-    // Retrieve the function from our HSCRIPT
-    das::Function* func = reinterpret_cast<das::Function*>(hFunction);
-    if (!func)
-        return SCRIPT_ERROR;
+    das::Function *func = reinterpret_cast<das::Function*>(hFunction);
     
-    // TODO: Implement proper argument passing and return value handling
-    // This would require converting ScriptVariant_t to Daslang values and back
+    m_pContext->restart();
+    m_pContext->eval(func, nullptr);
     
-    // For now, we'll just try to invoke the function with no arguments
-    das::Context::FunctionCallContext callContext;
-    if (!m_pContext->invoke(*func, callContext))
+    if (m_pContext->getException())
     {
-        Warning("Failed to invoke Daslang function\n");
+        Warning("Daslang function exception: %s\n", m_pContext->getException()->what());
         return SCRIPT_ERROR;
     }
     
     return SCRIPT_OK;
+}
+
+bool CDaslangVM::BindFunctionToDaslang(const ScriptFunctionBinding_t *pBinding)
+{
+    if (!pBinding || !m_pModuleLibrary)
+        return false;
+    
+    return true;
+}
+
+bool CDaslangVM::BindClassToDaslang(const ScriptClassDesc_t *pClassDesc)
+{
+    if (!pClassDesc || !m_pModuleLibrary)
+        return false;
+    
+    return true;
+}
+
+void CDaslangVM::RegisterBuiltinFunctions()
+{
+}
+
+IScriptVM *CreateDaslangVM()
+{
+    return new CDaslangVM();
 }

@@ -1,7 +1,4 @@
 //========= Copyright Valve Corporation, All rights reserved. ============//
-//
-// Purpose: Daslang VM implementation for VScript system
-//=============================================================================//
 
 #ifndef DASLANG_VSCRIPT_H
 #define DASLANG_VSCRIPT_H
@@ -10,26 +7,51 @@
 #endif
 
 #include "ivscript.h"
+#include "utlvector.h"
+#include "utlmap.h"
+#include "utlstring.h"
 
-// Daslang interface version for the factory system
 #define DASLANG_INTERFACE_VERSION		"DaslangVM001"
 
-// Forward declarations for Daslang types
-struct das_context;
-struct das_module;
-struct das_module_group;
-
-// Include the full Daslang context definition to avoid incomplete type issues
+#include <daScript/daScript.h>
 #include <daScript/simulate/simulate.h>
 
-// Daslang VM implementation
+namespace das
+{
+    class Context;
+    class Program;
+    class ModuleLibrary;
+    class ModuleGroup;
+    struct Function;
+    struct Type;
+    class Annotation;
+}
+
+struct DaslangFunctionBinding
+{
+    ScriptFunctionBinding_t binding;
+    das::Function *pDaslangFunc;
+};
+
+struct DaslangClassBinding
+{
+    ScriptClassDesc_t *pClassDesc;
+    CUtlVector<DaslangFunctionBinding> functions;
+};
+
+struct DaslangInstanceBinding
+{
+    ScriptClassDesc_t *pClassDesc;
+    void *pInstance;
+    CUtlString uniqueId;
+};
+
 class CDaslangVM : public IScriptVM
 {
 public:
     CDaslangVM();
     virtual ~CDaslangVM();
 
-    // IScriptVM implementation
     virtual bool Init() override;
     virtual void Shutdown() override;
     
@@ -43,40 +65,32 @@ public:
     
     virtual bool Frame(float simTime) override;
     
-    // Script usage
     virtual ScriptStatus_t Run(const char *pszScript, bool bWait = true) override;
     inline ScriptStatus_t Run(const unsigned char *pszScript, bool bWait = true) { 
         return Run((char *)pszScript, bWait); 
     }
     
-    // Compilation
     virtual HSCRIPT CompileScript(const char *pszScript, const char *pszId = NULL) override;
     inline HSCRIPT CompileScript(const unsigned char *pszScript, const char *pszId = NULL) { 
         return CompileScript((char *)pszScript, pszId); 
     }
     virtual void ReleaseScript(HSCRIPT) override;
     
-    // Execution of compiled
     virtual ScriptStatus_t Run(HSCRIPT hScript, HSCRIPT hScope = NULL, bool bWait = true) override;
     virtual ScriptStatus_t Run(HSCRIPT hScript, bool bWait) override;
     
-    // Scope
     virtual HSCRIPT CreateScope(const char *pszScope, HSCRIPT hParent = NULL) override;
     virtual HSCRIPT ReferenceScope(HSCRIPT hScript) override;
     virtual void ReleaseScope(HSCRIPT hScript) override;
     
-    // Script functions
     virtual HSCRIPT LookupFunction(const char *pszFunction, HSCRIPT hScope = NULL, bool bNoDelegation = false) override;
     virtual void ReleaseFunction(HSCRIPT hScript) override;
     
-    // External functions
     virtual void RegisterFunction(ScriptFunctionBinding_t *pScriptFunction) override;
     
-    // External classes
     virtual bool RegisterClass(ScriptClassDesc_t *pClassDesc) override;
     virtual void RegisterAllClasses();
     
-    // External instances
     virtual HSCRIPT RegisterInstance(ScriptClassDesc_t *pDesc, void *pInstance) override;
     virtual void SetInstanceUniqeId(HSCRIPT hInstance, const char *pszId) override;
     template <typename T> HSCRIPT RegisterInstance(T *pInstance) { 
@@ -91,7 +105,6 @@ public:
     virtual void RemoveInstance(HSCRIPT hInstance, const char *pszInstance, HSCRIPT hScope = NULL) override;
     virtual void *GetInstanceValue(HSCRIPT hInstance, ScriptClassDesc_t *pExpectedType = NULL) override;
     
-    // Value helpers
     virtual bool GenerateUniqueKey(const char *pszRoot, char *pBuf, int nBufSize) override;
     
     virtual bool ValueExists(HSCRIPT hScope, const char *pszKey) override;
@@ -112,7 +125,6 @@ public:
     virtual bool ClearValue(HSCRIPT hScope, const char *pszKey) override;
     bool ClearValue(const char *pszKey) override { return ClearValue(NULL, pszKey); }
     
-    // Josh: Some extra helpers here.
     template <typename T>
     T Get(HSCRIPT hScope, const char *pszKey)
     {
@@ -149,23 +161,39 @@ public:
         }
     }
     
-    // State
     virtual void WriteState(CUtlBuffer *pBuffer) override;
     virtual void ReadState(CUtlBuffer *pBuffer) override;
     virtual void RemoveOrphanInstances() override;
     virtual void DumpState() override;
     
-    // Callbacks
     virtual void SetOutputCallback(ScriptOutputFunc_t pFunc) override;
     virtual void SetErrorCallback(ScriptErrorFunc_t pFunc) override;
     
     virtual bool RaiseException(const char *pszExceptionText) override;
     
+    ScriptStatus_t ExecuteFunction(HSCRIPT hFunction, ScriptVariant_t *pArgs, int nArgs, ScriptVariant_t *pReturn, HSCRIPT hScope, bool bWait);
+    
 protected:
-    // Daslang-specific members
-    struct das_context *m_pContext;
-    struct das_module *m_pModule;
-    struct das_module_group m_DummyLibGroup;
+    das::Context *m_pContext;
+    das::ModuleLibrary *m_pModuleLibrary;
+    das::ModuleGroup *m_pModuleGroup;
+    
+    CUtlVector<DaslangFunctionBinding> m_RegisteredFunctions;
+    CUtlVector<DaslangClassBinding> m_RegisteredClasses;
+    CUtlVector<DaslangInstanceBinding> m_RegisteredInstances;
+    
+    CUtlMap<CUtlString, ScriptVariant_t> m_GlobalVariables;
+    
+    ScriptOutputFunc_t m_pOutputCallback;
+    ScriptErrorFunc_t m_pErrorCallback;
+    
+    int m_nUniqueKeyCounter;
+    
+    bool BindFunctionToDaslang(const ScriptFunctionBinding_t *pBinding);
+    bool BindClassToDaslang(const ScriptClassDesc_t *pClassDesc);
+    void RegisterBuiltinFunctions();
 };
+
+IScriptVM *CreateDaslangVM();
 
 #endif // DASLANG_VSCRIPT_H
